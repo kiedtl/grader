@@ -1,8 +1,9 @@
 mod types;
 mod utils;
 
-use clap::Parser;
+use ansi_to_tui::IntoText as _;
 use anyhow::{bail, Context};
+use clap::Parser;
 use chrono::NaiveDateTime;
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind},
@@ -165,7 +166,7 @@ impl App {
                     let report_str = fs::read_to_string(&report_path)
                         .context("Failed to read status.json")?;
                     let report = serde_json::from_str(&report_str)
-                        .context("Failed to parse status.json")?;
+                        .context(format!("Failed to parse {}", report_path.display()))?;
 
                     submissions.push(Submission {
                         student: path.file_name().unwrap()
@@ -566,19 +567,14 @@ fn render_overview(f: &mut Frame, app: &App, area: Rect) {
 
 fn render_content(f: &mut Frame, content: &str, scroll_offset: usize, area: Rect) {
     let inner_height = area.height.saturating_sub(2) as usize; // -2 for borders
-    let lines: Vec<Line> = content
-        .lines()
-        .enumerate()
-        .skip(scroll_offset)
-        .take(inner_height)
-        .map(|(lineno, line)| Line::from(vec![
-            Span::styled(
-                format!("{lineno: >4}  "),
-                Style::default().fg(Color::Magenta).add_modifier(Modifier::ITALIC)
-            ),
-            Span::raw(line.to_string()),
-        ]))
-        .collect();
+
+    let mut content = content.into_text().unwrap();
+    let mut lineno = 1;
+    for line in &mut content.lines {
+        line.spans.insert(0, span!(format!("{lineno: >4}  "), fg Magenta, mo ITALIC));
+        lineno += 1;
+    }
+    let lines: Vec<Line> = content.lines.clone().into_iter().skip(scroll_offset).take(inner_height).collect();
 
     let paragraph = Paragraph::new(lines)
         .wrap(Default::default())
@@ -592,7 +588,7 @@ fn render_content(f: &mut Frame, content: &str, scroll_offset: usize, area: Rect
     f.render_widget(paragraph, area);
 
     // Render scrollbar
-    let total_lines = content.lines().count();
+    let total_lines = content.lines.len();
     if total_lines > inner_height {
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
             .begin_symbol(Some("↑"))
