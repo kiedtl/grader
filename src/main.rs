@@ -1,4 +1,5 @@
 mod types;
+mod utils;
 
 use clap::Parser;
 use anyhow::{bail, Context};
@@ -36,7 +37,7 @@ macro_rules! style_ {
 }
 
 macro_rules! style {
-    ($($k:ident $i:ident,)+) => {{
+    ($($k:ident $i:ident),+$(,)*) => {{
         let mut s = Style::default();
         $(s = style_!(s, $k $i);)+
         s
@@ -431,37 +432,34 @@ fn ui(f: &mut Frame, app: &mut App) {
         .spacing(1)
         .split(f.area());
 
+    // Render sidebar
+    let block = Block::default()
+        .borders(Borders::RIGHT)
+        .border_type(BorderType::QuadrantInside)
+        .padding(Padding::right(1));
+
     let sidebar_chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(items.len() as u16), Constraint::Min(1)])
+        .constraints([Constraint::Length(items.len() as u16), Constraint::Min(1)])
         .spacing(1)
-        .split(chunks[0]);
+        .split(block.inner(chunks[0]));
 
-    // Render sidebar
     let items = List::new(items)
-        .block(
-            Block::default()
-                .borders(Borders::RIGHT)
-                .border_type(BorderType::QuadrantInside)
-                .padding(Padding::right(1))
-        )
         .highlight_style(Style::default().bg(Color::Blue).fg(Color::Black));
 
     f.render_stateful_widget(items, sidebar_chunks[0], &mut app.list_state);
 
     let widg = Paragraph::new(Line::from(vec![
-            Span::styled("Average: ", Style::default().add_modifier(Modifier::BOLD)),
+            span!("Average: ", mo BOLD),
             Span::styled(
                 ((average * 10.).round() / 10.).to_string(),
-                match average.ceil() as usize {
-                    0..=6 => Style::default().fg(Color::Black).bg(Color::Red),
-                    7..=8 => Style::default().fg(Color::Black).bg(Color::Yellow),
-                    _ => Style::default().fg(Color::Black).bg(Color::Green),
-                }
+                utils::style_for_score(average),
             ),
         ]));
 
     f.render_widget(widg, sidebar_chunks[1]);
+
+    f.render_widget(block, chunks[0]);
 
     render_main_view(f, app, chunks[1]);
     render_comments(f, app, chunks[2]);
@@ -480,7 +478,7 @@ fn render_main_view(f: &mut Frame, app: &mut App, area: Rect) {
         modes.iter().flat_map(|&mode| {
             let style =
                 if mode == app.mode {
-                    Style::default().fg(Color::Black).bg(Color::Blue).add_modifier(Modifier::BOLD)
+                    style!(fg Black, bg Blue, mo BOLD)
                 } else {
                     Style::default()
                 };
@@ -498,16 +496,10 @@ fn render_main_view(f: &mut Frame, app: &mut App, area: Rect) {
     match app.mode {
         Mode::Overview => (),
         Mode::Tests => {
+            let score = app.submission().report.tests_score();
             let widg = Paragraph::new(Line::from(vec![
-                    Span::styled("Score: ", Style::default().add_modifier(Modifier::BOLD)),
-                    Span::styled(
-                        app.submission().report.tests_score().to_string(),
-                        match app.submission().report.tests_score().ceil() as usize {
-                            0..=6 => Style::default().fg(Color::Black).bg(Color::Red),
-                            7..=8 => Style::default().fg(Color::Black).bg(Color::Yellow),
-                            _ => Style::default().fg(Color::Black).bg(Color::Green),
-                        }
-                    ),
+                    span!("Score: ", mo BOLD),
+                    Span::styled(score.to_string(), utils::style_for_score(score)),
                 ]))
                 .block(Block::default().borders(Borders::TOP).title("Status"));
 
