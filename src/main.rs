@@ -1,5 +1,8 @@
+mod types;
+
 use clap::Parser;
 use anyhow::{bail, Context};
+use chrono::NaiveDateTime;
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind},
     execute,
@@ -26,20 +29,55 @@ use std::{
     path::{Path, PathBuf},
 };
 
+macro_rules! style_ {
+    ($s:expr, bg $w:ident) => { $s.bg(Color::$w) };
+    ($s:expr, fg $w:ident) => { $s.fg(Color::$w) };
+    ($s:expr, mo $w:ident) => { $s.add_modifier(Modifier::$w) };
+}
+
+macro_rules! style {
+    ($($k:ident $i:ident,)+) => {{
+        let mut s = Style::default();
+        $(s = style_!(s, $k $i);)+
+        s
+    }};
+}
+
+macro_rules! span {
+    ($s:expr $(,$k:ident $i:ident)*) => {{
+        let st = {
+            #[allow(unused_mut)]
+            let mut s = Style::default();
+            $(s = style_!(s, $k $i);)*
+            s
+        };
+        Span::styled(std::borrow::Cow::from($s), st)
+    }};
+}
+
 #[derive(Parser, Debug)]
 struct Args {
-    #[arg(short = 'd', long, default_value = ".")]
+    #[arg(short = 'C', long, default_value = ".")]
     dir: String,
 
     #[arg(short = 'n', long)]
     file_name: String,
+
+    #[arg(short = 'd', long)]
+    late_deadline: String,
+
+    #[arg(short = 'D', long)]
+    final_deadline: String,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
 enum Mode {
     #[default]
+    Overview,
     Readme,
     Program,
+    Tests,
+    CompileLog,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -47,25 +85,45 @@ struct Report {
     #[serde(default)] compiled: bool,
     #[serde(default)] passed_tests: bool,
     #[serde(default)] readme_approved: Option<bool>,
+    #[serde(default)] readme_penalty: Option<f32>,
     #[serde(default)] code_approved: Option<bool>,
     #[serde(default)] tests_score_total: f32,
+    #[serde(default)] tests_score_override: Option<f32>,
+    #[serde(default)] manual_deductions: Vec<(f32, String)>,
+    date: String,
+}
+
+impl Report {
+    pub fn tests_score(&self) -> f32 {
+        self.tests_score_override.unwrap_or(self.tests_score_total)
+    }
+}
+
+struct Submission {
+    student: String,
+    path: PathBuf,
+
+    readme: String,
+    program: String,
+    test_log: String,
+    compile_log: String,
+
+    comments: String,
+    report: Report,
 }
 
 struct App {
     opts: Args,
-    directories: Vec<PathBuf>,
     list_state: ListState,
-    readme_content: String,
-    program_content: String,
-    comments: String,
+    submissions: Vec<Submission>,
+
     scroll_offset: usize,
     mode: Mode,
-    report: Report,
 }
 
 impl App {
     fn new(args: Args) -> anyhow::Result<Self> {
-        let mut directories = Vec::new();
+        let mut submissions = Vec::new();
 
         // Read all subdirectories
         let dir = Path::new(&args.dir);
@@ -74,91 +132,83 @@ impl App {
                 let entry = entry?;
                 let path = entry.path();
                 if path.is_dir() {
-                    // Check if it has both README.txt and status.json
-                    let readme = path.join("README.txt");
-                    let report = path.join("status.json");
-                    if readme.exists() && report.exists() {
-                        directories.push(path);
-                    }
+                    // Load README.txt
+                    let readme_path = path.join("README.txt");
+                    let readme = match fs::read_to_string(&readme_path) {
+                        Ok(s) => s,
+                        Err(e) => format!("{e:?}"),
+                    };
+
+                    // Load comments
+                    let comments_path = path.join("comments.txt");
+                    let comments = fs::read_to_string(&comments_path)
+                        .unwrap_or(String::new());
+
+                    // Load program code
+                    let program_path = path.join(&args.file_name);
+                    let program = fs::read_to_string(&program_path)
+                        .unwrap_or(format!("Could not read file {}", program_path.display()));
+
+                    // Load test log
+                    let log_path = path.join("test_log.txt");
+                    let test_log = fs::read_to_string(&log_path)
+                        .unwrap_or(format!("Could not read file {}", log_path.display()));
+
+                    // Load test log
+                    let comp_log_path = path.join("compile_log.txt");
+                    let compile_log = fs::read_to_string(&comp_log_path)
+                        .unwrap_or(format!("Could not read file {}", comp_log_path.display()));
+
+                    // Load status.json
+                    let report_path = path.join("status.json");
+                    let report_str = fs::read_to_string(&report_path)
+                        .context("Failed to read status.json")?;
+                    let report = serde_json::from_str(&report_str)
+                        .context("Failed to parse status.json")?;
+
+                    submissions.push(Submission {
+                        student: path.file_name().unwrap()
+                            .to_string_lossy()
+                            .trim_end_matches(".stud")
+                            .to_string(),
+                        path, readme, comments, program, test_log, compile_log, report,
+                    });
                 }
             }
         } else {
             bail!("Provided directory is not a directory");
         }
 
-        directories.sort();
+        submissions.sort_by_key(|s| s.student.clone());
 
         let mut app = App {
-            directories,
+            submissions,
             opts: args,
             list_state: ListState::default(),
-            readme_content: String::new(),
-            program_content: String::new(),
-            comments: String::new(),
             scroll_offset: 0,
             mode: Mode::default(),
-            report: Report::default(),
         };
 
-        // Select the first directory by default
-        if !app.directories.is_empty() {
-            app.list_state.select(Some(0));
-            app.load_current_directory()?;
-        }
+        assert!(!app.submissions.is_empty());
+        app.list_state.select(Some(0));
 
         Ok(app)
     }
 
-    fn load_current_directory(&mut self) -> anyhow::Result<()> {
-        if let Some(selected) = self.list_state.selected() {
-            if let Some(dir) = self.directories.get(selected) {
-                // Load README.txt
-                let readme_path = dir.join("README.txt");
-                self.readme_content = match fs::read_to_string(&readme_path) {
-                    Ok(s) => s,
-                    Err(e) => format!("{e:?}"),
-                };
-
-                // Load comments
-                let comments_path = dir.join("comments.txt");
-                self.comments = fs::read_to_string(&comments_path)
-                    .unwrap_or(String::new());
-
-                // Load program code
-                let program_path = dir.join(&self.opts.file_name);
-                self.program_content = fs::read_to_string(&program_path)
-                    .unwrap_or(format!("Could not read file {}", program_path.display()));
-
-                // Load status.json
-                let report_path = dir.join("status.json");
-                let report_str = fs::read_to_string(&report_path)
-                    .context("Failed to read status.json")?;
-                self.report = serde_json::from_str(&report_str)
-                    .context("Failed to parse status.json")?;
-
-                self.scroll_offset = 0;
-            }
-        }
-        Ok(())
-    }
-
     fn save_report(&self) {
-        if let Some(selected) = self.list_state.selected() {
-            if let Some(dir) = self.directories.get(selected) {
-                let report_path = dir.join("status.json");
-                if let Ok(json) = serde_json::to_string_pretty(&self.report) {
-                    let _ = fs::write(&report_path, json);
-                }
-                let comments_path = dir.join("comments.txt");
-                let _ = fs::write(&comments_path, &self.comments);
-            }
+        let submission = self.submission();
+        let report_path = submission.path.join("status.json");
+        if let Ok(json) = serde_json::to_string_pretty(&submission.report) {
+            let _ = fs::write(&report_path, json);
         }
+        let comments_path = submission.path.join("comments.txt");
+        let _ = fs::write(&comments_path, &submission.comments);
     }
 
     fn next_directory(&mut self) -> anyhow::Result<()> {
         let i = match self.list_state.selected() {
             Some(i) => {
-                if i >= self.directories.len() - 1 {
+                if i >= self.submissions.len() - 1 {
                     0
                 } else {
                     i + 1
@@ -167,7 +217,7 @@ impl App {
             None => 0,
         };
         self.list_state.select(Some(i));
-        self.load_current_directory()?;
+        self.scroll_offset = 0;
         Ok(())
     }
 
@@ -175,7 +225,7 @@ impl App {
         let i = match self.list_state.selected() {
             Some(i) => {
                 if i == 0 {
-                    self.directories.len() - 1
+                    self.submissions.len() - 1
                 } else {
                     i - 1
                 }
@@ -183,35 +233,45 @@ impl App {
             None => 0,
         };
         self.list_state.select(Some(i));
-        self.load_current_directory()?;
+        self.scroll_offset = 0;
         Ok(())
     }
 
     fn next_mode(&mut self) {
         self.mode = match self.mode {
-            Mode::Program => Mode::Readme,
-            Mode::Readme => Mode::Program,
+            Mode::Overview => Mode::Readme,
+            Mode::Readme => Mode::Tests,
+            Mode::Tests => Mode::CompileLog,
+            Mode::CompileLog => Mode::Program,
+            Mode::Program => Mode::Overview,
         };
+        self.scroll_offset = 0;
     }
 
     fn previous_mode(&mut self) {
         self.mode = match self.mode {
-            Mode::Program => Mode::Readme,
-            Mode::Readme => Mode::Program,
+            Mode::Overview => Mode::Program,
+            Mode::Readme => Mode::Overview,
+            Mode::Tests => Mode::Readme,
+            Mode::CompileLog => Mode::Tests,
+            Mode::Program => Mode::CompileLog,
         };
+        self.scroll_offset = 0;
     }
 
     fn approval(&self) -> Option<bool> {
         match self.mode {
-            Mode::Readme => self.report.readme_approved,
-            Mode::Program => self.report.code_approved,
+            Mode::Readme => self.submission().report.readme_approved,
+            Mode::Program => self.submission().report.code_approved,
+            _ => unreachable!(),
         }
     }
 
     fn toggle_approval(&mut self) {
         match self.mode {
-            Mode::Readme => self.report.readme_approved = Some(!self.report.readme_approved.unwrap_or(false)),
-            Mode::Program => self.report.code_approved = Some(!self.report.code_approved.unwrap_or(false)),
+            Mode::Readme => self.submission_mut().report.readme_approved = Some(!self.submission().report.readme_approved.unwrap_or(false)),
+            Mode::Program => self.submission_mut().report.code_approved = Some(!self.submission().report.code_approved.unwrap_or(false)),
+            _ => (),
         }
         self.save_report();
     }
@@ -222,10 +282,21 @@ impl App {
         }
     }
 
+    fn submission(&self) -> &Submission {
+        &self.submissions[self.list_state.selected().unwrap()]
+    }
+
+    fn submission_mut(&mut self) -> &mut Submission {
+        &mut self.submissions[self.list_state.selected().unwrap()]
+    }
+
     fn content(&self) -> &str {
         match self.mode {
-            Mode::Readme => &self.readme_content,
-            Mode::Program => &self.program_content,
+            Mode::Overview => "",
+            Mode::Readme => &self.submission().readme,
+            Mode::Program => &self.submission().program,
+            Mode::Tests => &self.submission().test_log,
+            Mode::CompileLog => &self.submission().compile_log,
         }
     }
 
@@ -288,19 +359,22 @@ fn run_app<B: ratatui::backend::Backend>(
                 match key.code {
                     KeyCode::Char('q') => return Ok(()),
                     KeyCode::Char('c') => {
-                        app.comments = edit(terminal, &app.comments);
+                        app.submission_mut().comments = edit(terminal, &app.submission().comments);
                         app.save_report();
                     },
                     KeyCode::Char('v') => {
                         _ = edit(terminal, match app.mode {
-                            Mode::Program => &app.program_content,
-                            Mode::Readme => &app.readme_content,
+                            Mode::Overview => continue,
+                            Mode::Program => &app.submission().program,
+                            Mode::Readme => &app.submission().readme,
+                            Mode::Tests => &app.submission().test_log,
+                            Mode::CompileLog => &app.submission().compile_log,
                         });
                     },
                     KeyCode::Down | KeyCode::Char('j') => app.next_directory()?,
                     KeyCode::Up | KeyCode::Char('k') => app.previous_directory()?,
-                    KeyCode::Left | KeyCode::Char('h') => app.next_mode(),
-                    KeyCode::Right | KeyCode::Char('l') => app.previous_mode(),
+                    KeyCode::Left | KeyCode::Char('h') => app.previous_mode(),
+                    KeyCode::Right | KeyCode::Char('l') => app.next_mode(),
                     KeyCode::Char(' ') => app.toggle_approval(),
                     KeyCode::PageDown => {
                         for _ in 0..10 {
@@ -330,16 +404,23 @@ fn run_app<B: ratatui::backend::Backend>(
 }
 
 fn ui(f: &mut Frame, app: &mut App) {
-    let items: Vec<ListItem> = app
-        .directories
+    let submissions = app.submissions
         .iter()
-        .map(|dir| {
-            let name = dir.file_name().unwrap()
-                .to_string_lossy()
-                .trim_end_matches(".stud")
-                .to_string();
-            ListItem::new(name)
-        })
+        .map(|sub| (
+            types::score(sub, &app.opts.late_deadline, &app.opts.final_deadline).unwrap(),
+            sub.student.clone()
+        ))
+        .collect::<Vec<_>>();
+    let average = submissions.iter().map(|(s, _)| s.total).sum::<f32>() / submissions.len() as f32;
+
+    let items: Vec<ListItem> = submissions.clone()
+        .into_iter()
+        .map(|(score, name)|
+            ListItem::new(Line::from(vec![
+                span!(format!(" {: >4}  ", score.total), fg Green),
+                span!(name)
+            ]))
+        )
         .collect();
     let max_item_width = items.iter().map(|i| i.width()).max().unwrap_or(5) as u16 + 3;
 
@@ -349,6 +430,12 @@ fn ui(f: &mut Frame, app: &mut App) {
         .constraints([Constraint::Length(max_item_width), Constraint::Fill(5), Constraint::Fill(2)])
         .spacing(1)
         .split(f.area());
+
+    let sidebar_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(items.len() as u16), Constraint::Min(1)])
+        .spacing(1)
+        .split(chunks[0]);
 
     // Render sidebar
     let items = List::new(items)
@@ -360,11 +447,23 @@ fn ui(f: &mut Frame, app: &mut App) {
         )
         .highlight_style(Style::default().bg(Color::Blue).fg(Color::Black));
 
-    f.render_stateful_widget(items, chunks[0], &mut app.list_state);
+    f.render_stateful_widget(items, sidebar_chunks[0], &mut app.list_state);
 
-    // Render main view
+    let widg = Paragraph::new(Line::from(vec![
+            Span::styled("Average: ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled(
+                ((average * 10.).round() / 10.).to_string(),
+                match average.ceil() as usize {
+                    0..=6 => Style::default().fg(Color::Black).bg(Color::Red),
+                    7..=8 => Style::default().fg(Color::Black).bg(Color::Yellow),
+                    _ => Style::default().fg(Color::Black).bg(Color::Green),
+                }
+            ),
+        ]));
+
+    f.render_widget(widg, sidebar_chunks[1]);
+
     render_main_view(f, app, chunks[1]);
-
     render_comments(f, app, chunks[2]);
 }
 
@@ -376,12 +475,12 @@ fn render_main_view(f: &mut Frame, app: &mut App, area: Rect) {
         .split(area);
 
     // Render mode toggle
-    let modes = &[Mode::Program, Mode::Readme];
+    let modes = &[Mode::Overview, Mode::Readme, Mode::Tests, Mode::CompileLog, Mode::Program];
     let line = Line::from_iter(
         modes.iter().flat_map(|&mode| {
             let style =
                 if mode == app.mode {
-                    Style::default().bg(Color::Blue).add_modifier(Modifier::BOLD)
+                    Style::default().fg(Color::Black).bg(Color::Blue).add_modifier(Modifier::BOLD)
                 } else {
                     Style::default()
                 };
@@ -396,14 +495,42 @@ fn render_main_view(f: &mut Frame, app: &mut App, area: Rect) {
         .block(Block::default().borders(Borders::TOP).title("Mode"));
     f.render_widget(mode_widget, main_chunks[0]);
 
-    // Render approval toggle
-    let approval_text = match app.approval() {
+    match app.mode {
+        Mode::Overview => (),
+        Mode::Tests => {
+            let widg = Paragraph::new(Line::from(vec![
+                    Span::styled("Score: ", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        app.submission().report.tests_score().to_string(),
+                        match app.submission().report.tests_score().ceil() as usize {
+                            0..=6 => Style::default().fg(Color::Black).bg(Color::Red),
+                            7..=8 => Style::default().fg(Color::Black).bg(Color::Yellow),
+                            _ => Style::default().fg(Color::Black).bg(Color::Green),
+                        }
+                    ),
+                ]))
+                .block(Block::default().borders(Borders::TOP).title("Status"));
+
+            f.render_widget(widg, main_chunks[1]);
+        },
+        Mode::CompileLog => {},
+        _ => render_approval(f, app.approval(), main_chunks[1]),
+    }
+
+    match app.mode {
+        Mode::Overview => render_overview(f, app, main_chunks[2]),
+        _ => render_content(f, app.content(), app.scroll_offset, main_chunks[2]),
+    }
+}
+
+fn render_approval(f: &mut Frame, approved: Option<bool>, area: Rect) {
+    let approval_text = match approved {
         Some(true) => "✓ Approved",
         Some(false) => "✗ Not Approved",
         None => "? Unchecked",
     };
 
-    let approval_style = match app.approval() {
+    let approval_style = match approved {
         Some(true) => Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
         Some(false) => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         None => Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
@@ -413,18 +540,44 @@ fn render_main_view(f: &mut Frame, app: &mut App, area: Rect) {
         .style(approval_style)
         .block(Block::default().borders(Borders::TOP).title("Status"));
 
-    f.render_widget(approval_widget, main_chunks[1]);
+    f.render_widget(approval_widget, area);
+}
 
-    // Render README content with scrollbar
-    let content_area = main_chunks[2];
+fn render_overview(f: &mut Frame, app: &App, area: Rect) {
+    let mut lines = Vec::new();
+    let mut l = |a, b| lines.push(Line::from(vec![a, b]));
 
-    // Calculate visible lines
-    let inner_height = content_area.height.saturating_sub(2) as usize; // -2 for borders
-    let lines: Vec<Line> = app
-        .content()
+    let score = types::score(app.submission(), &app.opts.late_deadline, &app.opts.final_deadline).unwrap();
+
+    l(span!("Submission date: ", mo BOLD), span!(score.submitted.to_string(), fg Blue));
+    l(span!(""), span!(""));
+
+    let base_score_label = if app.submission().report.tests_score_override.is_some() { "Base score (override): " } else { "Base score: " };
+    l(span!(base_score_label, mo BOLD), span!(score.base.to_string(), fg Blue));
+
+    use types::ScoreItem::*;
+    for item in score.items {
+        match item {
+            Comment(s) => l(span!("    ..  "), span!(s, mo ITALIC)),
+            Alert(s) => l(span!("    !!  ", fg Red), span!(s, mo ITALIC)),
+            Deduction(v, s) => l(span!(format!("{: >6}  ", format!("-{v}")), fg Red), span!(s, mo ITALIC)),
+        }
+    }
+    l(span!("Total: ", mo BOLD), span!(score.total.to_string(), fg Blue));
+
+    let paragraph = Paragraph::new(lines)
+        .wrap(Default::default())
+        .block(Block::default().borders(Borders::TOP).title("Content"));
+
+    f.render_widget(paragraph, area);
+}
+
+fn render_content(f: &mut Frame, content: &str, scroll_offset: usize, area: Rect) {
+    let inner_height = area.height.saturating_sub(2) as usize; // -2 for borders
+    let lines: Vec<Line> = content
         .lines()
         .enumerate()
-        .skip(app.scroll_offset)
+        .skip(scroll_offset)
         .take(inner_height)
         .map(|(lineno, line)| Line::from(vec![
             Span::styled(
@@ -440,25 +593,25 @@ fn render_main_view(f: &mut Frame, app: &mut App, area: Rect) {
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title("README")
+                .title("Content")
                 .padding(Padding::new(1, 1, 1, 1))
         );
 
-    f.render_widget(paragraph, content_area);
+    f.render_widget(paragraph, area);
 
     // Render scrollbar
-    let total_lines = app.content().lines().count();
+    let total_lines = content.lines().count();
     if total_lines > inner_height {
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
             .begin_symbol(Some("↑"))
             .end_symbol(Some("↓"));
 
         let mut scrollbar_state = ScrollbarState::new(total_lines.saturating_sub(inner_height))
-            .position(app.scroll_offset);
+            .position(scroll_offset);
 
         f.render_stateful_widget(
             scrollbar,
-            content_area.inner(ratatui::layout::Margin {
+            area.inner(ratatui::layout::Margin {
                 vertical: 1,
                 horizontal: 0,
             }),
@@ -468,7 +621,7 @@ fn render_main_view(f: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn render_comments(f: &mut Frame, app: &mut App, area: Rect) {
-    let mode_widget = Paragraph::new(Text::from(app.comments.as_str()))
+    let mode_widget = Paragraph::new(Text::from(app.submission().comments.as_str()))
         .wrap(Default::default())
         .block(
             Block::default()
@@ -477,4 +630,61 @@ fn render_comments(f: &mut Frame, app: &mut App, area: Rect) {
                 .padding(Padding::left(1))
         );
     f.render_widget(mode_widget, area);
+}
+
+// Parse eLC's utterly demented date format. Written be Claude because I can't be bothered to.
+fn parse_stupid_date(date_str: &str) -> anyhow::Result<NaiveDateTime> {
+    // The format "Feb 6, 2026 414 PM" - we can't preprocess it
+    // So we need to manually parse each component
+
+    // Split the string into parts
+    let parts: Vec<&str> = date_str.split_whitespace().collect();
+
+    if parts.len() < 4 {
+        bail!("Invalid date format");
+    }
+
+    // parts[0] = "Feb"
+    // parts[1] = "6,"  (with comma)
+    // parts[2] = "2026"
+    // parts[3] = "414"
+    // parts[4] = "PM"
+
+    let month = parts[0];
+    let day = parts[1].trim_end_matches(',');
+    let year = parts[2];
+    let time_digits = parts[3]; // "414"
+    let am_pm = parts[4]; // "PM"
+
+    // Parse the time digits: "414" means 4:14
+    // For 3 digits: first digit is hour, last two are minutes
+    // For 4 digits: first two are hour, last two are minutes
+    let (hour, minute) = if time_digits.len() == 3 {
+        // "414" -> hour=4, minute=14
+        let h = time_digits[0..1].parse::<u32>()?;
+        let m = time_digits[1..3].parse::<u32>()?;
+        (h, m)
+    } else if time_digits.len() == 4 {
+        // "1214" -> hour=12, minute=14
+        let h = time_digits[0..2].parse::<u32>()?;
+        let m = time_digits[2..4].parse::<u32>()?;
+        (h, m)
+    } else {
+        bail!("Invalid date format");
+    };
+
+    // Convert to 24-hour format
+    let hour_24 = if am_pm == "PM" && hour != 12 {
+        hour + 12
+    } else if am_pm == "AM" && hour == 12 {
+        0
+    } else {
+        hour
+    };
+
+    // Construct a string that chrono can parse
+    let formatted = format!("{} {}, {} {:02}:{:02}:00", month, day, year, hour_24, minute);
+
+    // Parse with format: "Feb 6, 2026 16:14:00"
+    Ok(NaiveDateTime::parse_from_str(&formatted, "%b %d, %Y %H:%M:%S")?)
 }

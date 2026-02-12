@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0.101"
+chrono = "0.4.43"
 clap = { version = "4.5.50", features = ["derive"] }
 crossterm = "0.29"
 edit = "0.1.5"
