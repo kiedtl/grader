@@ -81,6 +81,16 @@ pub fn score(submission: &Submission, late_deadline: &str, final_deadline: &str)
         items.push(ScoreItem::Deduction(2., "One or more compiler warnings".to_string()));
     }
 
+    if submission.report.inconsistent_io_penalty.is_some()
+    || submission.report.inconsistent_io_penalty_override.is_some()
+    {
+        let penalty = submission.report.inconsistent_io_penalty_override
+            .or(submission.report.inconsistent_io_penalty)
+            .unwrap();
+        final_score -= penalty;
+        items.push(ScoreItem::Deduction(penalty, "Inconsistent I/O".to_string()));
+    }
+
     Ok(Score {
         base: base_score,
         total: final_score,

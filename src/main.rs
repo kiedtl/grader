@@ -91,6 +91,8 @@ struct Report {
     #[serde(default)] code_approved: Option<bool>,
     #[serde(default)] tests_score_total: f32,
     #[serde(default)] tests_score_override: Option<f32>,
+    #[serde(default)] inconsistent_io_penalty: Option<f32>,
+    #[serde(default)] inconsistent_io_penalty_override: Option<f32>,
     #[serde(default)] manual_deductions: Vec<(f32, String)>,
     date: String,
 }
@@ -419,7 +421,7 @@ fn ui(f: &mut Frame, app: &mut App) {
         .into_iter()
         .map(|(score, name)|
             ListItem::new(Line::from(vec![
-                span!(format!(" {: >4}  ", score.total), fg Green),
+                span!(format!(" {: >4}  ", utils::round_score(score.total, 100.)), fg Green),
                 span!(name)
             ]))
         )
@@ -497,11 +499,20 @@ fn render_main_view(f: &mut Frame, app: &mut App, area: Rect) {
     match app.mode {
         Mode::Overview => (),
         Mode::Tests => {
-            let score = app.submission().report.tests_score();
-            let widg = Paragraph::new(Line::from(vec![
-                    span!("Score: ", mo BOLD),
-                    Span::styled(score.to_string(), utils::style_for_score(score)),
-                ]))
+            let report = &app.submission().report;
+            let score = report.tests_score();
+            let mut line = vec![
+                span!("Score: ", mo BOLD),
+                Span::styled(score.to_string(), utils::style_for_score(score))
+            ];
+            match (report.inconsistent_io_penalty, report.inconsistent_io_penalty_override) {
+                (Some(_), None) => line.push(span!(" !!Failed strict test!!", fg Red)),
+                (Some(_), Some(_)) => line.push(span!(" !!Failed strict test (penalty override)!!", fg Red)),
+                (None, Some(_)) => line.push(span!(" !!Manual inconsistent IO penalty!!", fg Red)),
+                (None, None) => (),
+            }
+
+            let widg = Paragraph::new(Line::from(line))
                 .block(Block::default().borders(Borders::TOP).title("Status"));
 
             f.render_widget(widg, main_chunks[1]);

@@ -2,6 +2,10 @@ use ratatui::{
     style::{Color, Style},
 };
 
+pub fn round_score(score: f32, factor: f32) -> f32 {
+    (score * factor).round() / factor
+}
+
 pub fn style_for_score(score: f32) -> Style {
     match score.ceil() as usize {
         0..=6 => Style::default().fg(Color::Black).bg(Color::Red),
