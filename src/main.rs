@@ -316,7 +316,7 @@ fn edit<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, s: &str) -> St
     let mut stdout = io::stdout();
     execute!(stdout, LeaveAlternateScreen, DisableMouseCapture).unwrap();
     disable_raw_mode().unwrap();
-    let s = edit::edit(&s).unwrap();
+    let s = edit::edit(s).unwrap();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture).unwrap();
     enable_raw_mode().unwrap();
     terminal.clear().unwrap();
@@ -358,8 +358,8 @@ fn run_app<B: ratatui::backend::Backend>(
     loop {
         terminal.draw(|f| ui(f, app)).unwrap();
 
-        if let Event::Key(key) = event::read()? {
-            if key.kind == KeyEventKind::Press {
+        if let Event::Key(key) = event::read()?
+            && key.kind == KeyEventKind::Press {
                 match key.code {
                     KeyCode::Char('q') => return Ok(()),
                     KeyCode::Char('c') => {
@@ -403,7 +403,6 @@ fn run_app<B: ratatui::backend::Backend>(
                     _ => {}
                 }
             }
-        }
     }
 }
 

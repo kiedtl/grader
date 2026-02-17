@@ -1,4 +1,3 @@
-use anyhow;
 
 use crate::{Submission, parse_stupid_date};
 use chrono::NaiveDateTime;
