@@ -1,6 +1,12 @@
 mod types;
 mod utils;
 
+use syntect::{
+    easy::HighlightLines,
+    highlighting::ThemeSet,
+    parsing::SyntaxSet,
+    util::LinesWithEndings,
+};
 use ansi_to_tui::IntoText as _;
 use anyhow::{bail, Context};
 use clap::Parser;
@@ -12,6 +18,7 @@ use crossterm::{
         disable_raw_mode, enable_raw_mode,
         EnterAlternateScreen, LeaveAlternateScreen,
     },
+    clipboard::CopyToClipboard,
 };
 // use itertools::Itertools;
 use ratatui::{
@@ -89,6 +96,7 @@ struct Report {
     #[serde(default)] readme_approved: Option<bool>,
     #[serde(default)] readme_penalty: Option<f32>,
     #[serde(default)] code_approved: Option<bool>,
+    #[serde(default)] code_penalty: Option<f32>,
     #[serde(default)] tests_score_total: f32,
     #[serde(default)] tests_score_override: Option<f32>,
     #[serde(default)] inconsistent_io_penalty: Option<f32>,
@@ -120,6 +128,9 @@ struct App {
     opts: Args,
     list_state: ListState,
     submissions: Vec<Submission>,
+
+    synset: SyntaxSet,
+    themeset: ThemeSet,
 
     scroll_offset: usize,
     mode: Mode,
@@ -188,6 +199,8 @@ impl App {
         let mut app = App {
             submissions,
             opts: args,
+            synset: SyntaxSet::load_defaults_newlines(),
+            themeset: ThemeSet::load_defaults(),
             list_state: ListState::default(),
             scroll_offset: 0,
             mode: Mode::default(),
@@ -362,6 +375,12 @@ fn run_app<B: ratatui::backend::Backend>(
             && key.kind == KeyEventKind::Press {
                 match key.code {
                     KeyCode::Char('q') => return Ok(()),
+                    KeyCode::Char('C') => {
+                        let sub = app.submission();
+                        let score = types::score(sub, &app.opts.late_deadline, &app.opts.final_deadline).unwrap().total;
+                        let comments = format!("[{}] ({}) {}", utils::round_score(score, 10.), sub.student, sub.comments);
+                        _ = execute!(std::io::stdout(), CopyToClipboard::to_clipboard_from(&comments));
+                    },
                     KeyCode::Char('c') => {
                         app.submission_mut().comments = edit(terminal, &app.submission().comments);
                         app.save_report();
@@ -522,7 +541,7 @@ fn render_main_view(f: &mut Frame, app: &mut App, area: Rect) {
 
     match app.mode {
         Mode::Overview => render_overview(f, app, main_chunks[2]),
-        _ => render_content(f, app.content(), app.scroll_offset, main_chunks[2]),
+        _ => render_content(f, app, app.scroll_offset, main_chunks[2]),
     }
 }
 
@@ -575,16 +594,44 @@ fn render_overview(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(paragraph, area);
 }
 
-fn render_content(f: &mut Frame, content: &str, scroll_offset: usize, area: Rect) {
+fn render_content(f: &mut Frame, app: &App, scroll_offset: usize, area: Rect) {
+    let syntax = app.synset.find_syntax_by_extension("c").unwrap();
+    let theme = &app.themeset.themes["InspiredGitHub"];
+    let mut h = HighlightLines::new(syntax, theme);
+
+    let mut content: Vec<Line<'static>> =
+        if app.mode == Mode::Program {
+            LinesWithEndings::from(app.content())
+                .map(|line| {
+                    let spans = h.highlight_line(line, &app.synset).unwrap();
+                    let ratatui_spans: Vec<Span> = spans
+                        .iter()
+                        .map(|(style, text)| {
+                            Span::styled(
+                                text.to_string(),
+                                Style::default().fg(Color::Rgb(
+                                    style.foreground.r,
+                                    style.foreground.g,
+                                    style.foreground.b
+                                ))
+                            )
+                        })
+                        .collect();
+                    Line::from(ratatui_spans)
+                })
+                .collect()
+        } else {
+            app.content().into_text().unwrap().lines
+        };
+
     let inner_height = area.height.saturating_sub(2) as usize; // -2 for borders
 
-    let mut content = content.into_text().unwrap();
     let mut lineno = 1;
-    for line in &mut content.lines {
+    for line in &mut content {
         line.spans.insert(0, span!(format!("{lineno: >4}  "), fg Magenta, mo ITALIC));
         lineno += 1;
     }
-    let lines: Vec<Line> = content.lines.clone().into_iter().skip(scroll_offset).take(inner_height).collect();
+    let lines: Vec<Line> = content.clone().into_iter().skip(scroll_offset).take(inner_height).collect();
 
     let paragraph = Paragraph::new(lines)
         .wrap(Default::default())
@@ -598,7 +645,7 @@ fn render_content(f: &mut Frame, content: &str, scroll_offset: usize, area: Rect
     f.render_widget(paragraph, area);
 
     // Render scrollbar
-    let total_lines = content.lines.len();
+    let total_lines = content.len();
     if total_lines > inner_height {
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
             .begin_symbol(Some("↑"))

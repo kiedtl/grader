@@ -52,10 +52,15 @@ pub fn score(submission: &Submission, late_deadline: &str, final_deadline: &str)
     match submission.report.code_approved {
         None => items.push(ScoreItem::alert("Style requirements not checked")),
         Some(false) => {
-            final_score -= 1.;
-            items.push(ScoreItem::Deduction(1., "Not meeting style requirements".to_string()));
+            let penalty = submission.report.code_penalty.unwrap_or(1.);
+            final_score -= penalty;
+            items.push(ScoreItem::Deduction(penalty, "Not meeting style requirements".to_string()));
         },
-        Some(true) => (),
+        Some(true) => {
+            if submission.report.code_penalty.is_some() {
+                items.push(ScoreItem::alert("Student's code is approved, but a penalty was given."));
+            }
+        },
     }
 
     match deadline_status(submission, late_deadline, final_deadline) {
