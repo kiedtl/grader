@@ -30,6 +30,23 @@ pub fn score(submission: &Submission, late_deadline: &str, final_deadline: &str)
     let mut items = Vec::new();
     let mut final_score = base_score;
 
+    match deadline_status(submission, late_deadline, final_deadline) {
+        Ok(DeadlineStatus::Early(hours, minutes)) => {
+            items.push(ScoreItem::Comment(format!("Early by {hours}h {minutes}m")));
+        },
+        Ok(DeadlineStatus::Late(hours, minutes)) => {
+            final_score -= 2.;
+            items.push(ScoreItem::Deduction(2., format!("Submitted {hours}h {minutes}m after deadline")));
+        },
+        Ok(DeadlineStatus::Missed(hours, minutes)) => {
+            final_score -= 10.;
+            items.push(ScoreItem::Deduction(10., format!("Submitted {hours}h {minutes}m after final deadline")));
+        },
+        Err(e) => {
+            items.push(ScoreItem::Comment(format!("Error parsing date: {e:?}")));
+        },
+    }
+
     for (penalty, reason) in &submission.report.manual_deductions {
         items.push(ScoreItem::Deduction(*penalty, reason.clone()));
         final_score -= penalty;
@@ -63,23 +80,6 @@ pub fn score(submission: &Submission, late_deadline: &str, final_deadline: &str)
         },
     }
 
-    match deadline_status(submission, late_deadline, final_deadline) {
-        Ok(DeadlineStatus::Early(hours, minutes)) => {
-            items.push(ScoreItem::Comment(format!("Early by {hours}h {minutes}m")));
-        },
-        Ok(DeadlineStatus::Late(hours, minutes)) => {
-            final_score -= 2.;
-            items.push(ScoreItem::Deduction(2., format!("Submitted {hours}h {minutes}m after deadline")));
-        },
-        Ok(DeadlineStatus::Missed(hours, minutes)) => {
-            final_score -= 10.;
-            items.push(ScoreItem::Deduction(10., format!("Submitted {hours}h {minutes}m after final deadline")));
-        },
-        Err(e) => {
-            items.push(ScoreItem::Comment(format!("Error parsing date: {e:?}")));
-        },
-    }
-
     if !submission.compile_log.trim().is_empty() {
         final_score -= 2.;
         items.push(ScoreItem::Deduction(2., "One or more compiler warnings".to_string()));
@@ -93,6 +93,18 @@ pub fn score(submission: &Submission, late_deadline: &str, final_deadline: &str)
             .unwrap();
         final_score -= penalty;
         items.push(ScoreItem::Deduction(penalty, "Inconsistent I/O".to_string()));
+    }
+
+    let contains_leaks = submission.valgrind.iter()
+        .any(|err| match err.kind.as_str() {
+            "Leak_DefinitelyLost" => true,
+            // "Leak_IndirectlyLost" => true, // Need to check requirements? Not sure if to penalize this
+            _ => false,
+        });
+    if contains_leaks {
+        let penalty = 2.;
+        final_score -= penalty;
+        items.push(ScoreItem::Deduction(penalty, "Leaked memory".to_string()));
     }
 
     Ok(Score {

@@ -1,5 +1,6 @@
 mod types;
 mod utils;
+mod valgrind;
 
 use syntect::{
     easy::HighlightLines,
@@ -87,6 +88,7 @@ enum Mode {
     Program,
     Tests,
     CompileLog,
+    Valgrind,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -119,6 +121,7 @@ struct Submission {
     program: String,
     test_log: String,
     compile_log: String,
+    valgrind: Vec<valgrind::Error>,
 
     comments: String,
     report: Report,
@@ -154,6 +157,11 @@ impl App {
                         Err(e) => format!("{e:?}"),
                     };
 
+                    let valgrind_path = path.join("valgrind_output.xml");
+                    let valgrind_raw = fs::read_to_string(&valgrind_path)
+                        .unwrap_or(String::new());
+                    let valgrind = valgrind::parse(&valgrind_raw); //.context(format!("Failed to parse Valgrind XML: {}", valgrind_path.display()))?;
+
                     // Load comments
                     let comments_path = path.join("comments.txt");
                     let comments = fs::read_to_string(&comments_path)
@@ -186,7 +194,8 @@ impl App {
                             .to_string_lossy()
                             .trim_end_matches(".stud")
                             .to_string(),
-                        path, readme, comments, program, test_log, compile_log, report,
+                        path, readme, program, test_log, compile_log, valgrind,
+                        comments, report,
                     });
                 }
             }
@@ -259,7 +268,8 @@ impl App {
             Mode::Overview => Mode::Readme,
             Mode::Readme => Mode::Tests,
             Mode::Tests => Mode::CompileLog,
-            Mode::CompileLog => Mode::Program,
+            Mode::CompileLog => Mode::Valgrind,
+            Mode::Valgrind => Mode::Program,
             Mode::Program => Mode::Overview,
         };
         self.scroll_offset = 0;
@@ -271,7 +281,8 @@ impl App {
             Mode::Readme => Mode::Overview,
             Mode::Tests => Mode::Readme,
             Mode::CompileLog => Mode::Tests,
-            Mode::Program => Mode::CompileLog,
+            Mode::Valgrind => Mode::CompileLog,
+            Mode::Program => Mode::Valgrind,
         };
         self.scroll_offset = 0;
     }
@@ -314,6 +325,7 @@ impl App {
             Mode::Program => &self.submission().program,
             Mode::Tests => &self.submission().test_log,
             Mode::CompileLog => &self.submission().compile_log,
+            Mode::Valgrind => "",
         }
     }
 
@@ -392,6 +404,7 @@ fn run_app<B: ratatui::backend::Backend>(
                             Mode::Readme => &app.submission().readme,
                             Mode::Tests => &app.submission().test_log,
                             Mode::CompileLog => &app.submission().compile_log,
+                            Mode::Valgrind => continue,
                         });
                     },
                     KeyCode::Down | KeyCode::Char('j') => app.next_directory()?,
@@ -494,7 +507,7 @@ fn render_main_view(f: &mut Frame, app: &mut App, area: Rect) {
         .split(area);
 
     // Render mode toggle
-    let modes = &[Mode::Overview, Mode::Readme, Mode::Tests, Mode::CompileLog, Mode::Program];
+    let modes = &[Mode::Overview, Mode::Readme, Mode::Tests, Mode::CompileLog, Mode::Valgrind, Mode::Program];
     let line = Line::from_iter(
         modes.iter().flat_map(|&mode| {
             let style =
@@ -535,12 +548,14 @@ fn render_main_view(f: &mut Frame, app: &mut App, area: Rect) {
 
             f.render_widget(widg, main_chunks[1]);
         },
-        Mode::CompileLog => {},
+        Mode::CompileLog => (),
+        Mode::Valgrind => (),
         _ => render_approval(f, app.approval(), main_chunks[1]),
     }
 
     match app.mode {
         Mode::Overview => render_overview(f, app, main_chunks[2]),
+        Mode::Valgrind => render_valgrind(f, app, main_chunks[2]),
         _ => render_content(f, app, app.scroll_offset, main_chunks[2]),
     }
 }
@@ -586,6 +601,53 @@ fn render_overview(f: &mut Frame, app: &App, area: Rect) {
         }
     }
     l(span!("Total: ", mo BOLD), span!(score.total.to_string(), fg Blue));
+
+    let paragraph = Paragraph::new(lines)
+        .wrap(Default::default())
+        .block(Block::default().borders(Borders::TOP).title("Content"));
+
+    f.render_widget(paragraph, area);
+}
+
+fn render_valgrind(f: &mut Frame, app: &App, area: Rect) {
+    let mut lines = Vec::new();
+
+    macro_rules! l {
+        ($($span:expr),*) => {
+            lines.push(Line::from(vec![$($span,)*]));
+        }
+    }
+
+    let vrep = &app.submission().valgrind;
+    for err in vrep {
+        l!(
+            span!("Error: ", mo BOLD),
+            span!(&err.kind, mo ITALIC, fg Blue)
+        );
+        if let Some(what) = &err.what {
+            l!(span!("  "), span!(what));
+        }
+        if let Some(xwhat) = &err.xwhat {
+            l!(span!("  "), span!(&xwhat.text));
+        }
+        for stack in &err.stacks {
+            l!(span!("  "), span!("Stack", mo BOLD));
+            for frame in &stack.frames {
+                if let Some(func) = &stack.frames.first()
+                    .and_then(|_| frame.func.as_deref())
+                {
+                    l!(
+                        span!("    in ", fg Magenta),
+                        span!(format!("{: <12} ", func.to_string()), fg Yellow),
+                        span!(frame.file.as_deref().unwrap_or("?").to_string()),
+                        span!(":", fg Gray),
+                        span!(frame.line.unwrap_or(0).to_string())
+                    );
+                }
+            }
+        }
+        l!();
+    }
 
     let paragraph = Paragraph::new(lines)
         .wrap(Default::default())
