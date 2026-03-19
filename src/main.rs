@@ -555,7 +555,7 @@ fn render_main_view(f: &mut Frame, app: &mut App, area: Rect) {
             f.render_widget(widg, main_chunks[1]);
         },
         Mode::CompileLog => (),
-        Mode::Valgrind => (),
+        Mode::Valgrind => render_valgrind_status(f, app, main_chunks[1]),
         _ => render_approval(f, app.approval(), main_chunks[1]),
     }
 
@@ -615,32 +615,41 @@ fn render_overview(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(paragraph, area);
 }
 
-fn render_valgrind(f: &mut Frame, app: &App, area: Rect) {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(2), Constraint::Min(0)])
-        .split(area);
-
+fn render_valgrind_status(f: &mut Frame, app: &App, area: Rect) {
     let valgrind = &app.submission().valgrind;
 
+    let total_leaked: u64 = valgrind
+        .iter().flat_map(|(_, v)| v.iter())
+        .filter_map(|err| err.xwhat.as_ref().map(|x| x.leakedbytes))
+        .sum();
+    let total_leaked_line = Line::from(vec![
+        span!("Bytes leaked: ", mo BOLD), span!(total_leaked.to_string(), fg Yellow),
+    ]);
+
     let mut errs = valgrind
-        .iter()
-        .flat_map(|(_, v)| v.iter())
+        .iter().flat_map(|(_, v)| v.iter())
         .map(|err| format!("{} ", err.kind.clone())) // Add space for display
         .collect::<Vec<_>>();
     errs.sort();
     errs.dedup();
+
     let err_spans = std::iter::once(span!("Errors: ", mo BOLD))
         .chain(
             errs.into_iter()
                 .map(|s| span!(s, mo ITALIC, fg Blue))
         )
         .collect::<Vec<_>>();
-    let paragraph = Paragraph::new(Line::from(err_spans))
-        .wrap(Default::default());
-    f.render_widget(paragraph, chunks[0]);
 
-    let cells = utils::auto_grid(chunks[1], valgrind.len(), 1);
+    let paragraph = Paragraph::new(vec![total_leaked_line, Line::from(err_spans)])
+        .wrap(Default::default());
+
+    f.render_widget(paragraph, area);
+}
+
+fn render_valgrind(f: &mut Frame, app: &App, area: Rect) {
+    let valgrind = &app.submission().valgrind;
+
+    let cells = utils::auto_grid(area, valgrind.len(), 1);
     for ((name, error_set), &area) in valgrind.iter().zip(cells.iter()) {
         let mut lines = Vec::new();
 

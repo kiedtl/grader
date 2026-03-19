@@ -72,6 +72,31 @@ fn parse_frame(reader: &mut Reader<&[u8]>) -> Frame {
     frame
 }
 
+fn parse_xwhat(reader: &mut Reader<&[u8]>) -> XWhat {
+    let mut xwhat = XWhat { text: String::new(), leakedbytes: 0, leakedblocks: 0 };
+    let mut buf = Vec::new();
+    loop {
+        buf.clear();
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(e)) => {
+                let tag = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                let text = parse_text(reader, &mut buf);
+                match tag.as_str() {
+                    "text" => xwhat.text = text,
+                    "leakedbytes" => xwhat.leakedbytes = text.parse().unwrap(),
+                    "leakedblocks" => xwhat.leakedbytes = text.parse().unwrap(),
+                    _ => (),
+                }
+            }
+            Ok(Event::End(e))
+                if String::from_utf8_lossy(e.name().as_ref()) == "xwhat" => break,
+            Ok(Event::Eof) => break,
+            _ => {}
+        }
+    }
+    xwhat
+}
+
 fn parse_stack(reader: &mut Reader<&[u8]>) -> Stack {
     let mut stack = Stack::default();
     let mut buf = Vec::new();
@@ -102,6 +127,7 @@ fn parse_error(reader: &mut Reader<&[u8]>) -> Error {
                 let tag = String::from_utf8_lossy(e.name().as_ref()).to_string();
                 match tag.as_str() {
                     "stack" => error.stacks.push(parse_stack(reader)),
+                    "xwhat" => error.xwhat = Some(parse_xwhat(reader)),
                     _ => {
                         let text = parse_text(reader, &mut buf);
                         match tag.as_str() {
