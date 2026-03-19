@@ -96,6 +96,8 @@ pub fn score(submission: &Submission, late_deadline: &str, final_deadline: &str)
     }
 
     let contains_leaks = submission.valgrind.iter()
+        .map(|(_, v)| v.iter())
+        .flatten()
         .any(|err| match err.kind.as_str() {
             "Leak_DefinitelyLost" => true,
             // "Leak_IndirectlyLost" => true, // Need to check requirements? Not sure if to penalize this

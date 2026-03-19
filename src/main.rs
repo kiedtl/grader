@@ -121,7 +121,7 @@ struct Submission {
     program: String,
     test_log: String,
     compile_log: String,
-    valgrind: Vec<valgrind::Error>,
+    valgrind: Vec<(String, Vec<valgrind::Error>)>,
 
     comments: String,
     report: Report,
@@ -157,10 +157,16 @@ impl App {
                         Err(e) => format!("{e:?}"),
                     };
 
-                    let valgrind_path = path.join("valgrind_output.xml");
-                    let valgrind_raw = fs::read_to_string(&valgrind_path)
-                        .unwrap_or(String::new());
-                    let valgrind = valgrind::parse(&valgrind_raw); //.context(format!("Failed to parse Valgrind XML: {}", valgrind_path.display()))?;
+                    let mut valgrind = Vec::new();
+                    for i in 0.. {
+                        let fname = format!("valgrind_r{i}.xml");
+                        let valgrind_path = path.join(&fname);
+                        if let Ok(xml) = fs::read_to_string(&valgrind_path) {
+                            valgrind.push((fname, valgrind::parse(&xml)));
+                        } else {
+                            break;
+                        }
+                    }
 
                     // Load comments
                     let comments_path = path.join("comments.txt");
@@ -610,50 +616,75 @@ fn render_overview(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_valgrind(f: &mut Frame, app: &App, area: Rect) {
-    let mut lines = Vec::new();
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(2), Constraint::Min(0)])
+        .split(area);
 
-    macro_rules! l {
-        ($($span:expr),*) => {
-            lines.push(Line::from(vec![$($span,)*]));
-        }
-    }
+    let valgrind = &app.submission().valgrind;
 
-    let vrep = &app.submission().valgrind;
-    for err in vrep {
-        l!(
-            span!("Error: ", mo BOLD),
-            span!(&err.kind, mo ITALIC, fg Blue)
-        );
-        if let Some(what) = &err.what {
-            l!(span!("  "), span!(what));
+    let mut errs = valgrind
+        .iter()
+        .map(|(_, v)| v.iter())
+        .flatten()
+        .map(|err| format!("{} ", err.kind.clone())) // Add space for display
+        .collect::<Vec<_>>();
+    errs.sort();
+    errs.dedup();
+    let err_spans = std::iter::once(span!("Errors: ", mo BOLD))
+        .chain(
+            errs.into_iter()
+                .map(|s| span!(s, mo ITALIC, fg Blue))
+        )
+        .collect::<Vec<_>>();
+    let paragraph = Paragraph::new(Line::from(err_spans))
+        .wrap(Default::default());
+    f.render_widget(paragraph, chunks[0]);
+
+    let cells = utils::auto_grid(chunks[1], valgrind.len(), 1);
+    for ((name, error_set), &area) in valgrind.iter().zip(cells.iter()) {
+        let mut lines = Vec::new();
+
+        macro_rules! l {
+            ($($span:expr),*) => {
+                lines.push(Line::from(vec![$($span,)*]));
+            }
         }
-        if let Some(xwhat) = &err.xwhat {
-            l!(span!("  "), span!(&xwhat.text));
-        }
-        for stack in &err.stacks {
-            l!(span!("  "), span!("Stack", mo BOLD));
-            for frame in &stack.frames {
-                if let Some(func) = &stack.frames.first()
-                    .and_then(|_| frame.func.as_deref())
-                {
-                    l!(
-                        span!("    in ", fg Magenta),
-                        span!(format!("{: <12} ", func.to_string()), fg Yellow),
-                        span!(frame.file.as_deref().unwrap_or("?").to_string()),
-                        span!(":", fg Gray),
-                        span!(frame.line.unwrap_or(0).to_string())
-                    );
+
+        for err in error_set {
+            l!(
+                span!("Error: ", mo BOLD),
+                span!(&err.kind, mo ITALIC, fg Blue)
+            );
+            if let Some(what) = &err.what {
+                l!(span!("  "), span!(what));
+            }
+            if let Some(xwhat) = &err.xwhat {
+                l!(span!("  "), span!(&xwhat.text));
+            }
+            for stack in &err.stacks {
+                for frame in &stack.frames {
+                    if let Some(func) = &stack.frames.first()
+                        .and_then(|_| frame.func.as_deref())
+                    {
+                        l!(
+                            span!("    in ", fg Magenta),
+                            span!(format!("{: <12} ", func.to_string()), fg Yellow),
+                            span!(frame.file.as_deref().unwrap_or("?").to_string()),
+                            span!(":", fg Gray),
+                            span!(frame.line.unwrap_or(0).to_string())
+                        );
+                    }
                 }
             }
         }
-        l!();
+
+        let paragraph = Paragraph::new(lines)
+            .wrap(Default::default())
+            .block(Block::default().borders(Borders::ALL).title(name.as_str()));
+
+        f.render_widget(paragraph, area);
     }
-
-    let paragraph = Paragraph::new(lines)
-        .wrap(Default::default())
-        .block(Block::default().borders(Borders::TOP).title("Content"));
-
-    f.render_widget(paragraph, area);
 }
 
 fn render_content(f: &mut Frame, app: &App, scroll_offset: usize, area: Rect) {
