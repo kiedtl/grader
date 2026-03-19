@@ -625,8 +625,7 @@ fn render_valgrind(f: &mut Frame, app: &App, area: Rect) {
 
     let mut errs = valgrind
         .iter()
-        .map(|(_, v)| v.iter())
-        .flatten()
+        .flat_map(|(_, v)| v.iter())
         .map(|err| format!("{} ", err.kind.clone())) // Add space for display
         .collect::<Vec<_>>();
     errs.sort();
@@ -665,7 +664,7 @@ fn render_valgrind(f: &mut Frame, app: &App, area: Rect) {
             for stack in &err.stacks {
                 for frame in &stack.frames {
                     if let Some(func) = &stack.frames.first()
-                        .and_then(|_| frame.func.as_deref())
+                        .and(frame.func.as_deref())
                     {
                         l!(
                             span!("    in ", fg Magenta),
