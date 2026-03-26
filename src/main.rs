@@ -704,7 +704,8 @@ fn render_content(f: &mut Frame, app: &App, scroll_offset: usize, area: Rect) {
         if app.mode == Mode::Program {
             LinesWithEndings::from(app.content())
                 .map(|line| {
-                    let spans = h.highlight_line(line, &app.synset).unwrap();
+                    let line = line.replace("\t", "    ");
+                    let spans = h.highlight_line(&line, &app.synset).unwrap();
                     let ratatui_spans: Vec<Span> = spans
                         .iter()
                         .map(|(style, text)| {
